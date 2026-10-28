@@ -1097,9 +1097,7 @@ class EventCreationHandler:
         # extremities to pile up, which in turn leads to state resolution
         # taking longer.
         room_id = event_dict["room_id"]
-        limiter = (
-            self.limiter.queue(room_id) if linearize else contextlib.nullcontext()
-        )
+        limiter = self.limiter.queue(room_id) if linearize else contextlib.nullcontext()
         async with limiter:
             if txn_id:
                 event = await self.get_event_from_transaction(
