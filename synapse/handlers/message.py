@@ -19,6 +19,7 @@
 # [This file includes modifications made by New Vector Limited]
 #
 #
+import contextlib
 import logging
 import random
 from http import HTTPStatus
@@ -988,6 +989,7 @@ class EventCreationHandler:
         depth: int | None = None,
         prev_state_events: StrCollection | None = None,
         delay_id: str | None = None,
+        linearize: bool = True,
     ) -> tuple[EventBase, int]:
         """
         Creates an event, then sends it.
@@ -1020,6 +1022,11 @@ class EventCreationHandler:
                 The state event IDs which represent the current forward extremities of the state DAG.
                 Only applicable on room versions which use a state DAG (MSC4242).
             delay_id: The delay ID of this event, if it was a delayed event.
+            linearize: Whether to serialise this send with other sends into the
+                same room. Should normally be left as True. Set to False only for
+                callers which may already be holding the room's limiter, e.g.
+                modules sending from within a callback, as the limiter is not
+                re-entrant.
 
         Returns:
             The event, and its stream ordering (if deduplication happened,
@@ -1090,7 +1097,8 @@ class EventCreationHandler:
         # extremities to pile up, which in turn leads to state resolution
         # taking longer.
         room_id = event_dict["room_id"]
-        async with self.limiter.queue(room_id):
+        limiter = self.limiter.queue(room_id) if linearize else contextlib.nullcontext()
+        async with limiter:
             if txn_id:
                 event = await self.get_event_from_transaction(
                     requester, txn_id, room_id
@@ -1103,22 +1111,22 @@ class EventCreationHandler:
                         event.internal_metadata.stream_ordering,
                     )
 
-        async with self._worker_lock_handler.acquire_read_write_lock(
-            NEW_EVENT_DURING_PURGE_LOCK_NAME, room_id, write=False
-        ):
-            return await self._create_and_send_nonmember_event_locked(
-                requester=requester,
-                event_dict=event_dict,
-                prev_event_ids=prev_event_ids,
-                state_event_ids=state_event_ids,
-                ratelimit=ratelimit,
-                txn_id=txn_id,
-                ignore_shadow_ban=ignore_shadow_ban,
-                outlier=outlier,
-                depth=depth,
-                prev_state_events=prev_state_events,
-                delay_id=delay_id,
-            )
+            async with self._worker_lock_handler.acquire_read_write_lock(
+                NEW_EVENT_DURING_PURGE_LOCK_NAME, room_id, write=False
+            ):
+                return await self._create_and_send_nonmember_event_locked(
+                    requester=requester,
+                    event_dict=event_dict,
+                    prev_event_ids=prev_event_ids,
+                    state_event_ids=state_event_ids,
+                    ratelimit=ratelimit,
+                    txn_id=txn_id,
+                    ignore_shadow_ban=ignore_shadow_ban,
+                    outlier=outlier,
+                    depth=depth,
+                    prev_state_events=prev_state_events,
+                    delay_id=delay_id,
+                )
 
     async def _create_and_send_nonmember_event_locked(
         self,
