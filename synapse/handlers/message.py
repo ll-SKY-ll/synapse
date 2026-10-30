@@ -19,8 +19,10 @@
 # [This file includes modifications made by New Vector Limited]
 #
 #
+import contextlib
 import logging
 import random
+from contextvars import ContextVar
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, Mapping, Optional, Sequence
 
@@ -97,6 +99,10 @@ if TYPE_CHECKING:
     from synapse.server import HomeServer
 
 logger = logging.getLogger(__name__)
+
+_rooms_held_by_current_task: ContextVar[frozenset[str]] = ContextVar(
+    "_rooms_held_by_current_task", default=frozenset()
+)
 
 
 class MessageHandler:
@@ -1090,35 +1096,45 @@ class EventCreationHandler:
         # extremities to pile up, which in turn leads to state resolution
         # taking longer.
         room_id = event_dict["room_id"]
-        async with self.limiter.queue(room_id):
-            if txn_id:
-                event = await self.get_event_from_transaction(
-                    requester, txn_id, room_id
-                )
-                if event:
-                    # we know it was persisted, so must have a stream ordering
-                    assert event.internal_metadata.stream_ordering
-                    return (
-                        event,
-                        event.internal_metadata.stream_ordering,
-                    )
+        held_rooms = _rooms_held_by_current_task.get()
+        if room_id in held_rooms:
+            limiter_cm = contextlib.nullcontext()
+        else:
+            limiter_cm = self.limiter.queue(room_id)
 
-            async with self._worker_lock_handler.acquire_read_write_lock(
-                NEW_EVENT_DURING_PURGE_LOCK_NAME, room_id, write=False
-            ):
-                return await self._create_and_send_nonmember_event_locked(
-                    requester=requester,
-                    event_dict=event_dict,
-                    prev_event_ids=prev_event_ids,
-                    state_event_ids=state_event_ids,
-                    ratelimit=ratelimit,
-                    txn_id=txn_id,
-                    ignore_shadow_ban=ignore_shadow_ban,
-                    outlier=outlier,
-                    depth=depth,
-                    prev_state_events=prev_state_events,
-                    delay_id=delay_id,
-                )
+        async with limiter_cm:
+            token = _rooms_held_by_current_task.set(held_rooms | {room_id})
+            try:
+                if txn_id:
+                    event = await self.get_event_from_transaction(
+                        requester, txn_id, room_id
+                    )
+                    if event:
+                        # we know it was persisted, so must have a stream ordering
+                        assert event.internal_metadata.stream_ordering
+                        return (
+                            event,
+                            event.internal_metadata.stream_ordering,
+                        )
+
+                async with self._worker_lock_handler.acquire_read_write_lock(
+                    NEW_EVENT_DURING_PURGE_LOCK_NAME, room_id, write=False
+                ):
+                    return await self._create_and_send_nonmember_event_locked(
+                        requester=requester,
+                        event_dict=event_dict,
+                        prev_event_ids=prev_event_ids,
+                        state_event_ids=state_event_ids,
+                        ratelimit=ratelimit,
+                        txn_id=txn_id,
+                        ignore_shadow_ban=ignore_shadow_ban,
+                        outlier=outlier,
+                        depth=depth,
+                        prev_state_events=prev_state_events,
+                        delay_id=delay_id,
+                    )
+            finally:
+                _rooms_held_by_current_task.reset(token)
 
     async def _create_and_send_nonmember_event_locked(
         self,
