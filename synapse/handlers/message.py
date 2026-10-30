@@ -1097,6 +1097,7 @@ class EventCreationHandler:
         # taking longer.
         room_id = event_dict["room_id"]
         held_rooms = _rooms_held_by_current_task.get()
+        limiter_cm: contextlib.AbstractAsyncContextManager[None]
         if room_id in held_rooms:
             limiter_cm = contextlib.nullcontext()
         else:
