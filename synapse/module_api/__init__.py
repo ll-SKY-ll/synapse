@@ -1271,6 +1271,11 @@ class ModuleApi:
         Membership events are not supported by this method. To update a user's membership
         in a room, please use the `update_room_membership` method instead.
 
+        Events sent through this method are not serialised with other sends into
+        the same room, so that modules can send events from within callbacks.
+        Modules sending many events into the same room concurrently are responsible
+        for not forking the room DAG excessively.
+
         Added in Synapse v1.22.0.
 
         Args:
@@ -1298,6 +1303,7 @@ class ModuleApi:
             event_dict,
             ratelimit=False,
             ignore_shadow_ban=True,
+            linearize=False,
         )
 
         return event
